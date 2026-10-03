@@ -1,6 +1,6 @@
 # EldenRing-PerformanceTweaks
 
-![Version](https://img.shields.io/badge/version-1.1.0-blue)
+![Version](https://img.shields.io/badge/version-1.2.0-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows%20x64-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -32,6 +32,8 @@ Controlled by the config:
 - Power throttling off for the process (`DisableThrottling`).
 - No sleep or display off while the game runs (`PreventSleep`).
 - Affinity mask without core 0 (`BypassCore0`).
+- On hybrid CPUs, a preference for the performance cores through CPU Sets (`PreferPCores`). The mod picks the logical cores with the highest efficiency class and calls `SetProcessDefaultCpuSets`. This is a preference, the scheduler can still use the other cores under load. On CPUs with one class of cores the mod writes a line to the log and changes nothing. Ignored when `BypassCore0` is on.
+- A higher priority for the thread that owns the game window (`MainThreadPriority`).
 - Minimum working set (`OptimizeWorkingSet`, `WorkingSetMinMB`).
 - MMCSS registration of the mod's worker thread under the chosen profile (`MMCSSProfile`). Game threads are not registered.
 
@@ -66,7 +68,8 @@ After a launch, check `er_performance_tweaks_log.log` next to the DLL. The file 
 | `General` | `WindowTitle` | empty | Window title to wait for. Empty means `ELDEN RING`. |
 | `CPU` | `PriorityLevel` | `1` | 0 Normal, 1 Above Normal, 2 High, 3 Realtime. Realtime can freeze the system. |
 | `CPU` | `BypassCore0` | `false` | Keep the game off core 0. Leave `false` on AMD Ryzen. |
-| `CPU` | `PreferPCores` | `true` | Reserved. The value is read, but 1.1.0 does nothing with it. |
+| `CPU` | `PreferPCores` | `false` | Prefer performance cores on hybrid CPUs. No effect on other CPUs. |
+| `CPU` | `MainThreadPriority` | `0` | Priority of the game window thread: 0 unchanged, 1 above normal, 2 highest. |
 | `Optimization` | `HighPrecisionTimer` | `true` | 0.5 ms timer resolution. |
 | `Optimization` | `MMCSSProfile` | `Games` | MMCSS task name: `Games` or `Pro Audio`. |
 | `Optimization` | `OptimizeWorkingSet` | `false` | Raise the minimum working set to reduce paging. |
@@ -74,7 +77,7 @@ After a launch, check `er_performance_tweaks_log.log` next to the DLL. The file 
 | `Power` | `DisableThrottling` | `true` | Turn off power throttling for the process. |
 | `Power` | `PreventSleep` | `true` | Keep the system and display awake. |
 
-The shipped ini sets `EnableLogging = true` and `PreferPCores = false`; the rest matches the defaults.
+The shipped ini sets `EnableLogging = true`; the rest matches the defaults.
 
 ### Building
 
@@ -116,6 +119,8 @@ MIT, see [LICENSE](LICENSE). Not affiliated with FromSoftware or Bandai Namco.
 - Отключение троттлинга питания для процесса (`DisableThrottling`).
 - Запрет сна и отключения экрана, пока идёт игра (`PreventSleep`).
 - Маска ядер без ядра 0 (`BypassCore0`).
+- На гибридных процессорах — предпочтение производительных ядер через CPU Sets (`PreferPCores`). Мод выбирает логические ядра с наибольшим классом эффективности и вызывает `SetProcessDefaultCpuSets`. Это предпочтение: под нагрузкой планировщик может занять и остальные ядра. На процессорах с ядрами одного класса мод пишет строку в лог и ничего не меняет. При включённом `BypassCore0` не применяется.
+- Повышенный приоритет потока, которому принадлежит окно игры (`MainThreadPriority`).
 - Минимальный рабочий набор памяти (`OptimizeWorkingSet`, `WorkingSetMinMB`).
 - Регистрация рабочего потока мода в MMCSS с выбранным профилем (`MMCSSProfile`). Потоки игры не регистрируются.
 
@@ -150,7 +155,8 @@ path = './../mod/dll/elden_ring_performance_tweaks.dll'
 | `General` | `WindowTitle` | пусто | Заголовок окна, которое ждать. Пусто — `ELDEN RING`. |
 | `CPU` | `PriorityLevel` | `1` | 0 обычный, 1 выше среднего, 2 высокий, 3 реального времени. С последним система может зависнуть. |
 | `CPU` | `BypassCore0` | `false` | Не пускать игру на ядро 0. На AMD Ryzen оставьте `false`. |
-| `CPU` | `PreferPCores` | `true` | Зарезервирован. Значение читается, но в 1.1.0 не используется. |
+| `CPU` | `PreferPCores` | `false` | Предпочитать производительные ядра на гибридных процессорах. На остальных ничего не делает. |
+| `CPU` | `MainThreadPriority` | `0` | Приоритет потока окна игры: 0 не менять, 1 выше среднего, 2 наивысший. |
 | `Optimization` | `HighPrecisionTimer` | `true` | Разрешение таймера 0,5 мс. |
 | `Optimization` | `MMCSSProfile` | `Games` | Имя задачи MMCSS: `Games` или `Pro Audio`. |
 | `Optimization` | `OptimizeWorkingSet` | `false` | Поднять минимальный рабочий набор, чтобы меньше уходило в подкачку. |
@@ -158,7 +164,7 @@ path = './../mod/dll/elden_ring_performance_tweaks.dll'
 | `Power` | `DisableThrottling` | `true` | Отключить троттлинг питания для процесса. |
 | `Power` | `PreventSleep` | `true` | Не давать системе и экрану засыпать. |
 
-В поставляемом ini стоит `EnableLogging = true` и `PreferPCores = false`, остальное совпадает со значениями по умолчанию.
+В поставляемом ini стоит `EnableLogging = true`, остальное совпадает со значениями по умолчанию.
 
 ### Сборка
 

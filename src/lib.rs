@@ -1,12 +1,13 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
-use windows_sys::Win32::Foundation::{HINSTANCE, BOOL};
+use windows_sys::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HINSTANCE, HWND};
 use windows_sys::Win32::System::LibraryLoader::{DisableThreadLibraryCalls, GetModuleFileNameW};
 use windows_sys::Win32::System::SystemServices::{DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH};
 use windows_sys::Win32::System::Threading::{
     SetPriorityClass, GetCurrentProcess, ABOVE_NORMAL_PRIORITY_CLASS, SetProcessAffinityMask,
-    SetProcessInformation, AvSetMmThreadCharacteristicsW
+    SetProcessInformation, AvSetMmThreadCharacteristicsW, OpenThread, SetProcessDefaultCpuSets,
+    SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_HIGHEST, THREAD_SET_INFORMATION
 };
 use windows_sys::Win32::Media::{timeBeginPeriod, timeEndPeriod};
 use windows_sys::Win32::System::Diagnostics::Debug::{
@@ -16,9 +17,11 @@ use windows_sys::Win32::System::Memory::{
     SetProcessWorkingSetSizeEx,
     QUOTA_LIMITS_HARDWS_MIN_DISABLE, QUOTA_LIMITS_HARDWS_MAX_DISABLE
 };
-use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+use windows_sys::Win32::System::SystemInformation::{
+    GetSystemCpuSetInformation, GlobalMemoryStatusEx, MEMORYSTATUSEX, SYSTEM_CPU_SET_INFORMATION
+};
 use std::sync::OnceLock;
-use windows_sys::Win32::UI::WindowsAndMessaging::FindWindowW;
+use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, GetWindowThreadProcessId};
 
 static mut G_DLL_INSTANCE: HINSTANCE = 0;
 static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -118,6 +121,7 @@ pub struct Config {
     pub priority_level: u32,
     pub bypass_core0: bool,
     pub prefer_pcores: bool,
+    pub main_thread_priority: u32,
     pub high_precision_timer: bool,
     pub mmcss_profile: String,
     pub window_title: String,
@@ -135,7 +139,8 @@ impl Default for Config {
             smart_wait: true,
             priority_level: 1,
             bypass_core0: false, // Default to FALSE: preserve Core 0 for game threads
-            prefer_pcores: true,
+            prefer_pcores: false, // Only matters on hybrid CPUs (P-cores + E-cores)
+            main_thread_priority: 0,
             high_precision_timer: true,
             mmcss_profile: "Games".to_string(),
             window_title: String::new(),
@@ -167,6 +172,7 @@ pub fn load_config() -> Config {
                 "PriorityLevel" => if let Ok(v) = val.parse() { config.priority_level = v; },
                 "BypassCore0" => config.bypass_core0 = val.to_lowercase() == "true",
                 "PreferPCores" => config.prefer_pcores = val.to_lowercase() == "true",
+                "MainThreadPriority" => if let Ok(v) = val.parse() { config.main_thread_priority = v; },
                 "HighPrecisionTimer" => config.high_precision_timer = val.to_lowercase() == "true",
                 "MMCSSProfile" => config.mmcss_profile = val.to_string(),
                 "WindowTitle" => config.window_title = val.to_string(),
@@ -181,33 +187,127 @@ pub fn load_config() -> Config {
     config
 }
 
-fn wait_for_game_window(custom_title: &str) {
+fn find_game_window(custom_title: &str) -> HWND {
     let mut titles = vec!["ELDEN RING\0".to_string(), "ELDEN RING™\0".to_string()];
     if !custom_title.is_empty() {
         titles.insert(0, format!("{}\0", custom_title));
     }
-    
-    unsafe {
-        let start_time = std::time::Instant::now();
-        loop {
-            for title in &titles {
-                let window_name: Vec<u16> = title.encode_utf16().collect();
-                let hwnd = FindWindowW(std::ptr::null(), window_name.as_ptr());
-                if hwnd != 0 {
-                    log(" - Success: Game window detected.");
-                    return;
-                }
-            }
-            
-            // Timeout after 40 seconds to prevent hanging if title is unknown
-            if start_time.elapsed().as_secs() > 40 {
-                log(" - Warning: SmartWait timeout (40s). Proceeding anyway.");
-                return;
-            }
-            
-            std::thread::sleep(std::time::Duration::from_millis(500));
+
+    for title in &titles {
+        let window_name: Vec<u16> = title.encode_utf16().collect();
+        let hwnd = unsafe { FindWindowW(std::ptr::null(), window_name.as_ptr()) };
+        if hwnd != 0 {
+            return hwnd;
         }
     }
+    0
+}
+
+fn wait_for_game_window(custom_title: &str) {
+    let start_time = std::time::Instant::now();
+    loop {
+        if find_game_window(custom_title) != 0 {
+            log(" - Success: Game window detected.");
+            return;
+        }
+
+        // Timeout after 40 seconds to prevent hanging if title is unknown
+        if start_time.elapsed().as_secs() > 40 {
+            log(" - Warning: SmartWait timeout (40s). Proceeding anyway.");
+            return;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+// Hybrid CPUs: keep the game on the performance cores through CPU Sets.
+// Unlike an affinity mask this is a preference, the scheduler may still use other cores under load.
+// Гибридные процессоры: держим игру на производительных ядрах через CPU Sets.
+// В отличие от маски affinity это предпочтение, под нагрузкой планировщик может занять и другие ядра.
+unsafe fn apply_pcore_preference(process: HANDLE) {
+    let mut length: u32 = 0;
+    GetSystemCpuSetInformation(std::ptr::null_mut(), 0, &mut length, process, 0);
+    if length == 0 {
+        log(" - P-cores: CPU Sets are not available on this system");
+        return;
+    }
+
+    // u64 storage keeps the entries aligned
+    let mut buffer = vec![0u64; (length as usize + 7) / 8];
+    let info = buffer.as_mut_ptr() as *mut SYSTEM_CPU_SET_INFORMATION;
+    if GetSystemCpuSetInformation(info, length, &mut length, process, 0) == 0 {
+        log(" - P-cores: Failed to query CPU Sets");
+        return;
+    }
+
+    let mut sets: Vec<(u32, u8)> = Vec::new();
+    let base = buffer.as_ptr() as *const u8;
+    let mut offset = 0usize;
+    while offset + std::mem::size_of::<SYSTEM_CPU_SET_INFORMATION>() <= length as usize {
+        let entry = &*(base.add(offset) as *const SYSTEM_CPU_SET_INFORMATION);
+        if entry.Size == 0 {
+            break;
+        }
+        // Type 0 = CpuSetInformation
+        if entry.Type == 0 {
+            let cpu_set = entry.Anonymous.CpuSet;
+            sets.push((cpu_set.Id, cpu_set.EfficiencyClass));
+        }
+        offset += entry.Size as usize;
+    }
+
+    let highest = sets.iter().map(|s| s.1).max().unwrap_or(0);
+    let lowest = sets.iter().map(|s| s.1).min().unwrap_or(0);
+    if highest == lowest {
+        log(&format!(" - P-cores: CPU is not hybrid ({} logical cores of one class), skipped", sets.len()));
+        return;
+    }
+
+    let ids: Vec<u32> = sets.iter().filter(|s| s.1 == highest).map(|s| s.0).collect();
+    if SetProcessDefaultCpuSets(process, ids.as_ptr(), ids.len() as u32) != 0 {
+        log(&format!(" - P-cores: Preferred {} of {} logical cores", ids.len(), sets.len()));
+    } else {
+        log(" - P-cores: Failed to set default CPU Sets");
+    }
+}
+
+// Raises the priority of the thread that owns the game window (the game's main thread).
+// Повышает приоритет потока, которому принадлежит окно игры (главный поток игры).
+unsafe fn apply_main_thread_priority(level: u32, custom_title: &str) {
+    let priority = match level {
+        1 => THREAD_PRIORITY_ABOVE_NORMAL,
+        2 => THREAD_PRIORITY_HIGHEST,
+        _ => {
+            log(" - Main thread: Priority unchanged (Disabled in config)");
+            return;
+        }
+    };
+
+    let hwnd = find_game_window(custom_title);
+    if hwnd == 0 {
+        log(" - Main thread: Game window not found, priority unchanged");
+        return;
+    }
+
+    let mut process_id: u32 = 0;
+    let thread_id = GetWindowThreadProcessId(hwnd, &mut process_id);
+    if thread_id == 0 || process_id != std::process::id() {
+        log(" - Main thread: Window belongs to another process, priority unchanged");
+        return;
+    }
+
+    let thread = OpenThread(THREAD_SET_INFORMATION, 0, thread_id);
+    if thread == 0 {
+        log(" - Main thread: Failed to open the window thread");
+        return;
+    }
+    if SetThreadPriority(thread, priority) != 0 {
+        log(&format!(" - Main thread: Priority raised (Level {}, thread {})", level, thread_id));
+    } else {
+        log(" - Main thread: Failed to set priority");
+    }
+    CloseHandle(thread);
 }
 
 /// Main entry point for optimizations / Основная точка входа для оптимизаций
@@ -222,7 +322,7 @@ unsafe fn apply_optimizations() {
         std::thread::sleep(std::time::Duration::from_secs(config.init_delay));
     }
 
-    log("Initializing performance adjustments v1.1...");
+    log("Initializing performance adjustments v1.2...");
     let process = GetCurrentProcess();
 
     // 0. Stability: Suppress critical error dialogs / Скрытие диалогов критических ошибок
@@ -270,7 +370,15 @@ unsafe fn apply_optimizations() {
         }
     } else {
         log(" - Scheduling: OS Managed (All CPU cores & Thread Director preserved)");
+
+        if config.prefer_pcores {
+            apply_pcore_preference(process);
+        } else {
+            log(" - P-cores: Skipping (Disabled in config)");
+        }
     }
+
+    apply_main_thread_priority(config.main_thread_priority, &config.window_title);
 
     // 4. Memory Priority & Dynamic Working Set Expansion (Zero Hard-Caps!)
     #[repr(C)]
@@ -398,7 +506,7 @@ pub unsafe extern "system" fn DllMain(instance: HINSTANCE, call_reason: u32, _: 
             
             // Truncate log file on start
             let log_file = get_log_path();
-            let _ = std::fs::write(log_file, "=== Elden Ring Performance Tweaks v1.1.0 Initialized ===\n");
+            let _ = std::fs::write(log_file, "=== Elden Ring Performance Tweaks v1.2.0 Initialized ===\n");
             
             let _ = std::thread::Builder::new()
                 .name("er-perf-tweaks".to_string())
